@@ -9,8 +9,7 @@ from pydantic import BaseModel
 
 load_dotenv()
 
-# ====== Config desde entorno ======
-GEMINI_API_KEY = "AIzaSyBMt3o2djQMpbKd_p6Uk1n3znFxefp1rGw"
+GEMINI_API_KEY = "AIzaSyD8_B7f5QFkdSDrrQ49YJd5fgMwRYRdjzM"
 POSTGRES_CONNECTION_STRING = "postgresql://postgres:laberinto@localhost:5432/labtech_bot"
 QDRANT_URL = "http://localhost:6333"
 QDRANT_API_KEY = "e5362baf-c777-4d57-a609-6eaf1f9e87f6"
@@ -18,21 +17,18 @@ QDRANT_COLLECTION_1="documentos_gemini"
 QDRANT_COLLECTION_2="documentos_tarifas"
 
 if not GEMINI_API_KEY:
-    # No abort aquí; permitimos iniciar para pruebas locales, pero en producción hace falta la clave
     print("WARNING: GEMINI_API_KEY no configurada. Instanciación final del LLM fallará sin ella.")
 
 
-# ====== FastAPI App ======
 app = FastAPI(title="Chat Agent API")
 
-# ====== CORS configuration ======
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://agent-tt.netlify.app",
         "http://localhost:3000",
         "http://localhost:5173",
-        "*"  # Permitir todos los orígenes como fallback
+        "*"  
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -40,13 +36,12 @@ app.add_middleware(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # En producción, especifica los orígenes permitidos
+    allow_origins=["*"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ====== Pydantic models para el chat ======
 class ChatRequest(BaseModel):
     chat_id: str
     message: str
@@ -55,10 +50,10 @@ class ChatResponse(BaseModel):
     chat_id: str
     response: str
 
-# ====== Memoria simple persistente en PostgreSQL (asyncpg) ======
+
 try:
     import asyncpg
-except Exception:  # pragma: no cover
+except Exception: 
     asyncpg = None
 
 
@@ -98,7 +93,7 @@ class PostgresChatMemory:
                 )
                 print("[POSTGRES] ✅ Tabla 'chat_messages_web' verificada/creada")
                 
-                # Verificar conexión
+
                 result = await conn.fetchval("SELECT COUNT(*) FROM chat_messages_web")
                 print(f"[POSTGRES] ✅ Mensajes en base de datos: {result}")
         except Exception as e:
@@ -136,7 +131,7 @@ class PostgresChatMemory:
         return [dict(row) for row in reversed(rows)]
 
 
-# ====== Qdrant retrieval tools ======
+
 try:
     from qdrant_client import QdrantClient
     from langchain_qdrant import QdrantVectorStore
@@ -162,14 +157,12 @@ def create_retrieval_tool_from_collection(collection_name: str, qdrant_client: Q
 
 
     if QdrantVectorStore is None or Document is None:
-        # Retorno de una función dummy que indica la ausencia de la integración
+    
         def missing_tool(query: str, metadata_filter: Optional[Dict] = None):
             return [{"page_content": "Qdrant no disponible: instala qdrant-client/langchain-qdrant"}]
 
         return missing_tool
 
-    # Usando LangChain Qdrant wrapper
-    # Especificar que el contenido está en el campo 'text' del payload
     vectorstore = QdrantVectorStore(
         client=qdrant_client,
         collection_name=collection_name,
@@ -181,12 +174,12 @@ def create_retrieval_tool_from_collection(collection_name: str, qdrant_client: Q
         print(f"[QDRANT TOOL] Ejecutando búsqueda: query='{query[:50]}...', k={k}")
         
         try:
-            # Búsqueda ampliada para obtener más candidatos
-            search_k = k * 4  # Buscar 4x más documentos
+
+            search_k = k * 4
             results = vectorstore.similarity_search_with_score(query, k=search_k)
             print(f"[QDRANT TOOL] Resultados brutos obtenidos: {len(results)}")
             
-            # Procesar y re-rankear resultados
+
             query_lower = query.lower()
             query_terms = set(query_lower.split())
             
@@ -199,15 +192,15 @@ def create_retrieval_tool_from_collection(collection_name: str, qdrant_client: Q
                 
                 content_lower = content.lower()
                 
-                # Calcular relevancia por coincidencia de términos (BM25 simplificado)
+  
                 term_matches = sum(1 for term in query_terms if len(term) > 3 and term in content_lower)
                 term_score = term_matches / max(len(query_terms), 1)
                 
-                # Penalizar documentos que solo tienen tarifas/números cuando se busca información textual
+                
                 has_substantive_text = len([w for w in content_lower.split() if len(w) > 5]) > 10
                 text_quality_bonus = 0.1 if has_substantive_text else 0.0
                 
-                # Score combinado: vector similarity + relevancia de términos + calidad de texto
+           
                 combined_score = (-vector_score if vector_score < 0 else vector_score) + (term_score * 0.3) + text_quality_bonus
                 
                 scored_docs.append({
@@ -217,17 +210,15 @@ def create_retrieval_tool_from_collection(collection_name: str, qdrant_client: Q
                     'combined_score': combined_score,
                     'content': content
                 })
-            
-            # Ordenar por score combinado (mayor es mejor)
+
             scored_docs.sort(key=lambda x: x['combined_score'], reverse=True)
             
-            # Seleccionar top k
             filtered_docs = []
             for idx, item in enumerate(scored_docs[:k]):
                 doc = item['doc']
                 print(f"[QDRANT TOOL] Doc {idx+1}: vector={item['vector_score']:.4f}, terms={item['term_score']:.2f}, combined={item['combined_score']:.4f}, len={len(item['content'])}, preview={item['content'][:80]}...")
                 
-                # Agregar scores a metadata
+
                 if not hasattr(doc, 'metadata'):
                     doc.metadata = {}
                 doc.metadata['score'] = f"{item['combined_score']:.4f}"
@@ -248,7 +239,6 @@ def create_retrieval_tool_from_collection(collection_name: str, qdrant_client: Q
     return tool_sync
 
 
-# ====== Integración con Gemini usando LangChain oficial ======
 try:
     from langchain_google_genai import ChatGoogleGenerativeAI
 except Exception:
@@ -280,7 +270,6 @@ class GeminiClient:
         return await loop.run_in_executor(None, sync_call)
 
 
-# ====== Agente/Orquestador simple ======
 class SimpleAgent:
 
     def __init__(self, llm: GeminiClient, memory: PostgresChatMemory, tool1, tool2, tool1_desc: str = "", tool2_desc: str = ""):
@@ -294,7 +283,6 @@ class SimpleAgent:
     async def expand_query(self, user_message: str) -> List[str]:
         """Expande la query del usuario con sinónimos y variaciones para mejorar búsqueda."""
         
-        # Diccionario de expansiones comunes
         expansions = {
             'tarifa': ['tarifa', 'precio', 'costo', 'valor', 'monto'],
             'precio': ['precio', 'tarifa', 'costo', 'valor'],
@@ -311,17 +299,14 @@ class SimpleAgent:
         }
         
         query_lower = user_message.lower()
-        expanded_terms = set([user_message])  # Incluir query original
-        
-        # Agregar expansiones relevantes
+        expanded_terms = set([user_message])  #
         for term, synonyms in expansions.items():
             if term in query_lower:
-                # Agregar términos relacionados a la query
-                for syn in synonyms[:2]:  # Limitar a 2 sinónimos por término
+                for syn in synonyms[:2]:  
                     if syn not in query_lower:
                         expanded_terms.add(f"{user_message} {syn}")
         
-        result = list(expanded_terms)[:3]  # Limitar a 3 variaciones
+        result = list(expanded_terms)[:3]  
         if len(result) > 1:
             print(f"[QUERY EXPANSION] Query expandida a {len(result)} variaciones")
         return result
@@ -329,7 +314,6 @@ class SimpleAgent:
     async def classify_question(self, user_message: str) -> Dict[str, Any]:
         """Clasifica la pregunta del usuario para determinar filtros de metadatos."""
         
-        # Palabras clave para cada categoría
         legal_keywords = [
             'daño', 'daños', 'pérdida', 'pérdidas', 'robo', 'robos', 'responsabilidad',
             'seguro', 'cobertura', 'accidente', 'accidentes', 'legal', 'política',
@@ -352,7 +336,6 @@ class SimpleAgent:
         
         message_lower = user_message.lower()
         
-        # Contar coincidencias
         legal_score = sum(1 for keyword in legal_keywords if keyword in message_lower)
         tarifa_score = sum(1 for keyword in tarifa_keywords if keyword in message_lower)
         
@@ -365,7 +348,6 @@ class SimpleAgent:
             'prioritize': None
         }
         
-        # Determinar categoría dominante
         if legal_score > tarifa_score and legal_score > 0:
             result['category'] = 'legal'
             result['prioritize'] = 'kb1'
@@ -380,43 +362,34 @@ class SimpleAgent:
         return result
 
     async def run(self, chat_id: str, user_message: str) -> str:
-        # Guardar mensaje del usuario
         await self.memory.add_message(chat_id, "user", user_message)
 
-        # Recuperar contexto reciente
         recent = await self.memory.get_recent(chat_id, limit=8)
 
-        # Clasificar la pregunta para aplicar filtros inteligentes
         classification = await self.classify_question(user_message)
 
-        # Obtener documentos relevantes de las dos colecciones
+
         docs1 = []
         docs2 = []
         
-        # Expandir query para mejorar resultados
+
         expanded_queries = await self.expand_query(user_message)
-        
-        # Buscar en KB-1 con mayor prioridad si es pregunta legal/políticas
-        # Aumentado k para obtener más contexto de fragmentos pequeños
+
         k1 = 8 if classification['prioritize'] == 'kb1' else 5
         k2 = 5 if classification['prioritize'] == 'kb1' else 8
         
-        # Score threshold eliminado temporalmente para debugging - devolver todos los resultados
-        score_threshold_kb1 = 0.0  # Aceptar todos los resultados
-        score_threshold_kb2 = 0.0  # Aceptar todos los resultados
+        score_threshold_kb1 = 0.0 
+        score_threshold_kb2 = 0.0  
         
         print(f"\n[QDRANT] Buscando en KB-1 (Políticas y Legal) - k={k1}, threshold={score_threshold_kb1}")
         if self.tool1:
             try:
-                # Usar la mejor query (la original primero)
                 main_query = expanded_queries[0]
                 docs1 = self.tool1(main_query, k=k1, metadata_filter=classification['kb1_filter'], score_threshold=score_threshold_kb1)
                 
-                # Si no hay suficientes resultados, intentar con query expandida
                 if len(docs1) < 2 and len(expanded_queries) > 1:
                     print(f"[QDRANT] Pocos resultados, intentando con query expandida...")
                     docs1_expanded = self.tool1(expanded_queries[1], k=k1, metadata_filter=classification['kb1_filter'], score_threshold=score_threshold_kb1)
-                    # Combinar resultados eliminando duplicados
                     existing_contents = {getattr(d, 'page_content', '') for d in docs1}
                     for doc in docs1_expanded:
                         if getattr(doc, 'page_content', '') not in existing_contents:
@@ -425,7 +398,6 @@ class SimpleAgent:
                 print(f"[QDRANT] ✅ KB-1: Se encontraron {len(docs1)} documentos (ordenados por relevancia)")
                 for i, doc in enumerate(docs1, 1):
                     content = getattr(doc, 'page_content', '') or str(doc)
-                    # Obtener scores si están disponibles
                     metadata = getattr(doc, 'metadata', {})
                     combined_score = metadata.get('score', 'N/A')
                     vector_score = metadata.get('vector_score', 'N/A')
@@ -436,34 +408,30 @@ class SimpleAgent:
                         print(f"[QDRANT] KB-1 Doc #{i} [Combined:{combined_score} Vector:{vector_score} Terms:{term_score}]")
                         print(f"         {preview}\n")
                     else:
-                        print(f"[QDRANT] KB-1 Doc #{i}: ⚠️ CONTENIDO VACÍO\n")
+                        print(f"[QDRANT] KB-1 Doc #{i}:  CONTENIDO VACÍO\n")
             except Exception as e:
-                print(f"[QDRANT] ❌ Error en KB-1: {type(e).__name__}: {str(e)}")
+                print(f"[QDRANT]  Error en KB-1: {type(e).__name__}: {str(e)}")
                 docs1 = []
         else:
-            print(f"[QDRANT] ⚠️ KB-1: Herramienta no disponible")
+            print(f"[QDRANT] KB-1: Herramienta no disponible")
         
         print(f"\n[QDRANT] Buscando en KB-2 (Operaciones y Tarifas) - k={k2}, threshold={score_threshold_kb2}")
         if self.tool2:
             try:
-                # Usar la mejor query (la original primero)
                 main_query = expanded_queries[0]
                 docs2 = self.tool2(main_query, k=k2, metadata_filter=classification['kb2_filter'], score_threshold=score_threshold_kb2)
                 
-                # Si no hay suficientes resultados, intentar con query expandida
                 if len(docs2) < 2 and len(expanded_queries) > 1:
                     print(f"[QDRANT] Pocos resultados, intentando con query expandida...")
                     docs2_expanded = self.tool2(expanded_queries[1], k=k2, metadata_filter=classification['kb2_filter'], score_threshold=score_threshold_kb2)
-                    # Combinar resultados eliminando duplicados
                     existing_contents = {getattr(d, 'page_content', '') for d in docs2}
                     for doc in docs2_expanded:
                         if getattr(doc, 'page_content', '') not in existing_contents:
                             docs2.append(doc)
                 
-                print(f"[QDRANT] ✅ KB-2: Se encontraron {len(docs2)} documentos (ordenados por relevancia)")
+                print(f"[QDRANT] KB-2: Se encontraron {len(docs2)} documentos (ordenados por relevancia)")
                 for i, doc in enumerate(docs2, 1):
                     content = getattr(doc, 'page_content', '') or str(doc)
-                    # Obtener scores si están disponibles
                     metadata = getattr(doc, 'metadata', {})
                     combined_score = metadata.get('score', 'N/A')
                     vector_score = metadata.get('vector_score', 'N/A')
@@ -474,16 +442,15 @@ class SimpleAgent:
                         print(f"[QDRANT] KB-2 Doc #{i} [Combined:{combined_score} Vector:{vector_score} Terms:{term_score}]")
                         print(f"         {preview}\n")
                     else:
-                        print(f"[QDRANT] KB-2 Doc #{i}: ⚠️ CONTENIDO VACÍO\n")
+                        print(f"[QDRANT] KB-2 Doc #{i}:  CONTENIDO VACÍO\n")
             except Exception as e:
-                print(f"[QDRANT] ❌ Error en KB-2: {type(e).__name__}: {str(e)}")
+                print(f"[QDRANT]  Error en KB-2: {type(e).__name__}: {str(e)}")
                 docs2 = []
         else:
-            print(f"[QDRANT] ⚠️ KB-2: Herramienta no disponible")
+            print(f"[QDRANT] KB-2: Herramienta no disponible")
         
         print(f"\n[QDRANT] Resumen: KB-1={len(docs1)} docs, KB-2={len(docs2)} docs\n")
 
-        # Construir prompt para el LLM
         prompt_parts = [
             "1. ROL, IDENTIDAD Y OBJETIVO",
             "Identidad: Eres un Agente Virtual de Atención al Cliente altamente profesional para TRANSTUR, S.A. (marcas Cubacar, Havanautos y REX).",
@@ -549,7 +516,6 @@ class SimpleAgent:
         
         if docs1:
             for d in docs1:
-                # Extraer contenido (viene del campo 'text' de Qdrant mapeado a page_content)
                 content = getattr(d, 'page_content', '') or str(d)
                 if content:
                     prompt_parts.append(f"- {content}")
@@ -561,7 +527,6 @@ class SimpleAgent:
         
         if docs2:
             for d in docs2:
-                # Extraer contenido (viene del campo 'text' de Qdrant mapeado a page_content)
                 content = getattr(d, 'page_content', '') or str(d)
                 if content:
                     prompt_parts.append(f"- {content}")
@@ -593,7 +558,6 @@ class SimpleAgent:
         return reply
 
 
-# ====== Inicializaciones asíncronas/bootstrapping ======
 _agent: Optional[SimpleAgent] = None
 _memory: Optional[PostgresChatMemory] = None
 
@@ -603,15 +567,15 @@ async def bootstrap() -> None:
 
     print("[BOOTSTRAP] Inicializando conexión a PostgreSQL...")
     if not POSTGRES_CONNECTION_STRING:
-        print("[BOOTSTRAP] ⚠️ POSTGRES_CONNECTION_STRING no configurada")
+        print("[BOOTSTRAP]  POSTGRES_CONNECTION_STRING no configurada")
         _memory = None
     else:
         try:
             _memory = PostgresChatMemory(POSTGRES_CONNECTION_STRING)
             await _memory.init()
-            print("[BOOTSTRAP] ✅ Memoria PostgreSQL inicializada correctamente")
+            print("[BOOTSTRAP]  Memoria PostgreSQL inicializada correctamente")
         except Exception as e:
-            print(f"[BOOTSTRAP] ❌ Error inicializando PostgreSQL: {type(e).__name__}: {str(e)}")
+            print(f"[BOOTSTRAP]  Error inicializando PostgreSQL: {type(e).__name__}: {str(e)}")
             _memory = None
 
     llm = None
@@ -652,11 +616,9 @@ async def bootstrap() -> None:
 
 @app.on_event("startup")
 async def on_startup():
-    # Bootstrap en background
     await bootstrap()
 
 
-# ====== Endpoint para enviar mensaje al chat ======
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
     """
@@ -671,14 +633,12 @@ async def chat_endpoint(request: ChatRequest):
     print(f"[CHAT] Mensaje recibido de {request.chat_id}: {request.message}")
     
     try:
-        # Verificar que el agente esté inicializado
         if _agent is None:
             raise HTTPException(
                 status_code=503, 
                 detail="El servicio no está disponible. El agente no está inicializado."
             )
         
-        # Procesar mensaje con el agente
         reply = await _agent.run(request.chat_id, request.message)
         
         print(f"[CHAT] Respuesta generada para {request.chat_id}: {reply[:100]}...")
@@ -697,7 +657,6 @@ async def chat_endpoint(request: ChatRequest):
         )
 
 
-# ====== Endpoint para obtener historial de conversación ======
 @app.get("/chat/{chat_id}/history")
 async def get_chat_history(chat_id: str, limit: int = 10):
     """
@@ -737,7 +696,6 @@ async def get_chat_history(chat_id: str, limit: int = 10):
         )
 
 
-# ====== Endpoint de health check ======
 @app.get("/health")
 async def health_check():
     """
